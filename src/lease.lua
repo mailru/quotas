@@ -6,7 +6,7 @@ n = require('net.box')
 
 slices = 10
 
-local master_addr
+local master_conn
 local max_lease
 
 function bootstrapdb()
@@ -21,16 +21,16 @@ end
 
 function init_lease(p_master_addr, p_max_lease)
   bootstrapdb()
-  master_addr = p_master_addr
+  master_conn = n:new(p_master_addr[1], p_master_addr[2])
   max_lease = p_max_lease
 end
 
 function get_master(user, domain)
-  return n:new(master_addr[1], master_addr[2])
+  return master_conn
 end
 
 function is_master(user, domain)
-  return master_addr == nil
+  return master_conn == nil
 end
 
 function get_max_lease(user, domain, op)
