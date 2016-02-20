@@ -67,7 +67,7 @@ function gossip_lease(key, srv, stime, used)
   local processed = 0
   for i = 1, #servers do
     if servers[i] ~= conn_pool.self_server then
-      if math.mod(pickle.unpack('i', digest.urandom(4)),g
+      if math.mod(pickle.unpack('i', digest.urandom(4)),
                  (g_size - processed)) < left then
         servers[i].conn:call('announce_lease', key, srv, stime, used)
         left = left - 1
@@ -86,7 +86,7 @@ function announce_lease(key, srv, stime, used)
   end
   if announces[srv] == nil then
     announces[srv] = {[key] = {used = 0, stime = stime}}
-  elseif announces[srv][key] == nil org
+  elseif announces[srv][key] == nil or
     announces[srv][key]['stime'] < stime then
     announces[srv][key] = {used = 0, stime = stime}
   end
@@ -98,7 +98,7 @@ function announce_lease(key, srv, stime, used)
   announces[srv][key]['used'] = used
   local usage = get_usage(key, stime)
   clear_history(usage, stime)
-  usage['history'][1 + math.mod(stime, slices)] =g
+  usage['history'][1 + math.mod(stime, slices)] =
     usage['history'][1 + math.mod(stime, slices)] +
     used - announces[srv][key]['used']
   fiber.create(gossip_lease, key, srv, stime, used)
