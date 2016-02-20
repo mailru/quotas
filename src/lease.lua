@@ -1,112 +1,145 @@
 #!/usr/local/bin/tarantool
 
-f = require('fiber')
-m = require('math')
-n = require('net.box')
+fiber = require('fiber')
+math = require('math')
+pickle = require('pickle')
+digest = require('digest')
 
 slices = 10
 
-local master_conn
+local conn_pool
+local neighbor
 local max_lease
 
+local leases = {}
+local reminders = {}
+local announces = {}
+
 function bootstrapdb()
-  s = box.schema.space.create('leases', {if_not_exists = true})
-  box.schema.user.grant('guest', 'read,write', 'space', 'leases', {if_not_exists = true})
-  i = s:create_index('primary', { if_not_exists = true, type = 'hash', unique = true,
-    parts = {1, 'str', 2, 'str', 3, 'num'}})
-  s:truncate()
-  box.schema.func.create('request_lease', {if_not_exists = true})
-  box.schema.user.grant('guest', 'execute', 'function', 'request_lease', {if_not_exists = true})
+  box.schema.func.create('announce_lease', {if_not_exists = true})
+  box.schema.user.grant('guest', 'execute', 'function', 'announce_lease',
+    {if_not_exists = true})
 end
 
-function init_lease(p_master_addr, p_max_lease)
+function init_lease(p_conn_pool, p_neighbor, p_max_lease)
   bootstrapdb()
-  master_conn = n:new(p_master_addr[1], p_master_addr[2])
+  conn_pool = p_conn_pool
+  neighbor = p_neighbor
   max_lease = p_max_lease
 end
 
-function get_master(user, domain)
-  return master_conn
-end
-
-function is_master(user, domain)
-  return master_conn == nil
-end
-
-function get_max_lease(user, domain, op)
+function get_max_lease(key)
   return max_lease
 end
 
-function request_lease(user, domain, op, quota)
-  local time = f.time()
-  local slice_time = m.floor(time * slices)
-  local s = box.space['leases']
-  local lease = s:select({user, domain, op})
+function get_key(user, domain, op)
+  return user .. '::' .. domain .. '::' .. op
+end
 
-  if is_master(user, domain) then
-    if #lease == 0 then
-      usage = {}
-      for i = 1, slices do
-        usage[i] = m.floor(quota / slices)
+--clear outdated history
+function clear_history(usage, stime)
+  local history = usage['history']
+  for i = usage['stime'] + 1, math.min(stime, usage['stime'] + slices) do
+    history[1 + math.mod(i, slices)] = 0
+  end
+  usage['stime'] = stime
+end
+
+function get_usage(key, slice_time)
+  local usage = leases[key]
+  if usage == nil then
+    usage = {history = {}, stime = slice_time}
+    for i = 1, slices do
+      usage['history'][i] = 0
+    end
+    leases[key] = usage
+  end
+  return usage
+end
+
+function gossip_lease(key, srv, stime, used)
+  local servers = conn_pool:all()
+  local g_size = #servers
+  if conn_pool.self_server ~= nil then
+    g_size = g_size - 1
+  end
+  local left = math.min(neighbor, g_size)
+  local processed = 0
+  for i = 1, #servers do
+    if servers[i] ~= conn_pool.self_server then
+      if math.mod(pickle.unpack('i', digest.urandom(4)),g
+                 (g_size - processed)) < left then
+        servers[i].conn:call('announce_lease', key, srv, stime, used)
+        left = left - 1
       end
-      local slice = 1 + m.mod(slice_time, slices)
-      usage[slice] = quota - (slices - 1) * m.floor(quota / slices)
-      s:insert({user, domain, op, quota, 
-        {usage = usage, utime = slice_time}})
-      return {0, (slice_time + 1) / slices}
-    else
-      lease = lease[1]
-      local usage = lease[5]['usage']
-
-      local quota_usage = 0
-      for i = slice_time - slices + 1, lease[5]['utime'] do
-        quota_usage = quota_usage + usage[1 + m.mod(i, slices)]
-      end
-
-      for i = lease[5]['utime'] + 1, 
-        m.min(slice_time, lease[5]['utime'] + slices) do
-        usage[1 + m.mod(i, slices)] = 0
-      end
-
-      local grant = math.min(get_max_lease(user, domain, op), quota - quota_usage)
-      usage[1 + m.mod(slice_time, slices)] = 
-        usage[1 + m.mod(slice_time, slices)] + grant
-      s:update({user, domain, op}, {{'=', 4, quota}, 
-        {'=', 5, {usage = usage, utime = slice_time}}})
-      return {grant, (slice_time + 1) / slices}
+      processed = processed + 1
+    end
+    if left == 0 then
+      break
     end
   end
+end
 
-  if #lease > 0 then
-    lease = lease[1]
-    local rem = lease[5]['lease'] + m.min(quota - lease[4], 0)
-    if lease[5]['expire'] < time then
-      rem = 0
-    end
-    grant = m.min(rem, get_max_lease(user, domain))
-    if grant > 0 then
-      s:update({user, domain, op}, {{'=', 4, quota}, 
-        {'=', 5, {lease = rem - grant, expire = lease[5]['expire']}}})
-      return {grant, lease[5]['expire']}
-    end
+function announce_lease(key, srv, stime, used)
+  if srv == box.info.server.uuid then
+    return
   end
-  master = get_master(u, d)
-  master_lease = master:call('request_lease', user, domain, op, quota)[1]
-  master:close()
-  grant = m.min(master_lease[1], get_max_lease(user, domain))
-  if #lease > 0 then
-    s:update({user, domain, op}, {{'=', 4, quota}, 
-        {'=', 5, {lease = grant, expire = master_lease[2]}}})
-  else
-    s:insert({user, domain, op, quota, 
-      {lease = master_lease[1] - grant,
-        expire = master_lease[2]}})
+  if announces[srv] == nil then
+    announces[srv] = {[key] = {used = 0, stime = stime}}
+  elseif announces[srv][key] == nil org
+    announces[srv][key]['stime'] < stime then
+    announces[srv][key] = {used = 0, stime = stime}
   end
-  return {grant, master_lease[2]}
+  if announces[srv][key]['stime'] > stime or
+    announces[srv][key]['used'] >= used then
+    return
+  end
+
+  announces[srv][key]['used'] = used
+  local usage = get_usage(key, stime)
+  clear_history(usage, stime)
+  usage['history'][1 + math.mod(stime, slices)] =g
+    usage['history'][1 + math.mod(stime, slices)] +
+    used - announces[srv][key]['used']
+  fiber.create(gossip_lease, key, srv, stime, used)
+end
+
+function request_lease(key, quota, time)
+  local slice_time = math.floor(time * slices)
+  local usage = get_usage(key, slice_time)
+
+  clear_history(usage, slice_time)
+
+  --sum last sec resource usage
+  local history = usage['history']
+  local quota_usage = 0
+  for i = slice_time - slices + 1, usage['stime'] do
+    quota_usage = quota_usage + history[1 + math.mod(i, slices)]
+  end
+  local grant = math.min(get_max_lease(key), quota - quota_usage)
+  grant = math.max(grant, 0)
+  history[1 + math.mod(slice_time, slices)] =
+    history[1 + math.mod(slice_time, slices)] + grant
+  if grant > 0 then
+    fiber.create(gossip_lease, key,
+      box.info.server.uuid, slice_time, quota_usage + grant)
+  end
+  return {lease = grant, exp = (slice_time + 1) / slices}
 end
 
 function get_lease(user, domain, op, quota)
-  return request_lease(user, domain, op, quota)[1] > 0
+  local key = get_key(user, domain, op)
+  local reminder = reminders[key]
+  local time = fiber.time()
+  if reminder == nil or reminder['exp'] <= time or reminder['lease'] == 0 then
+    reminder = request_lease(key, quota, time)
+    reminders[key] = reminder
+  end
+  if reminder['lease'] > 0 then
+    reminder['lease'] = reminder['lease'] - 1
+    return true
+  end
+  return false
 end
 
 return {
