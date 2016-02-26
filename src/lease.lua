@@ -136,8 +136,11 @@ local function gossip_fiber(queue)
                     task_count = task_count + 1
                 end
             end
+            if task_count >= task_pack_size then
+                break
+            end 
             task = queue:get(0)
-        until task == nil or task_count >= task_pack_size
+        until task == nil
         if task_count > 0 then
             send_lease(servers, task_pack)
         end
