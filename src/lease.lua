@@ -69,12 +69,15 @@ local function renew_grant(grant, scaled_time)
         grant.update_time = scaled_time
         for i = 0, SLICES - 1 do
             grant[i] = 0
+            grant.seq_id[i] = 0
         end
         return true
     end
     
     for i = 1, mmin(SLICES, scaled_time - grant.update_time) do
-        grant[mmod(grant.update_time + i, SLICES)] = 0
+        local index = mmod(grant.update_time + i, SLICES)
+        grant[index] = 0
+        grant.seq_id[index] = 0
     end
     grant.update_time = scaled_time
     return true
@@ -84,7 +87,7 @@ end
 local function get_grant(key)
     local grant = grants[key]
     if grant == nil then
-        grant = {}
+        grant = {seq_id = {}}
         grants[key] = grant
     end
     return grant
@@ -111,10 +114,11 @@ local function select_neighbours(servers, count)
     count = mmin(#neighbours, count)
     local selected = {}
     for i = 1, count do
-        local index = mrandom(#neighbours - i)
+        local last = #neighbours - i + 1
+        local index = mrandom(last)
         selected[i] = neighbours[index]
-        neighbours[index] = neighbours[#neighbours]
-        neighbours[#neighbours] = selected[i]
+        neighbours[index] = neighbours[last]
+        neighbours[last] = selected[i]
     end
     return selected
 end
@@ -129,16 +133,14 @@ local function gossip_fiber(queue)
         repeat
             local index = mmod(task.scaled_time, SLICES)
             local server_grant = get_server_grant(task.server, task.key)
-	    -- check if grant info is not outdated
-            if renew_grant(server_grant, task.scaled_time)
-                and (server_grant[index] < task.grant or task.server == server_id) then
+            -- check if grant info is not outdated
+            if renew_grant(server_grant, task.scaled_time) then
                 local server_key = build_server_resource_key(task.server, task.key)
-                if task_pack[server_key] then
-		    -- update exisiting task in pack
-                    task_pack[server_key].grant = server_grant[index]
-                else
+                local task_key = server_key .. '::' .. tostring(index)
+                if not task_pack[task_key] then
                     task.grant = server_grant[index]
-                    task_pack[server_key] = task
+                    task.seq_id = server_grant.seq_id[index]
+                    task_pack[task_key] = task
                     task_count = task_count + 1
                 end
             end
@@ -163,11 +165,12 @@ local function update_grant(task)
     if not renew_grant(server_grant, task.scaled_time) then
         return false
     end
-    local delta = task.grant - server_grant[index]
-    if delta <= 0 then
+    if server_grant.seq_id[index] >= task.seq_id then
         return false
     end
+    local delta = task.grant - server_grant[index]
     server_grant[index] = server_grant[index] + delta
+    server_grant.seq_id[index] = task.seq_id
     local cluster_grant = get_cluster_grant(task.key)
     if not renew_grant(cluster_grant, task.scaled_time) then
         return false
@@ -213,13 +216,40 @@ local function request_lease(key, quota, time)
     renew_grant(server_grant, scaled_time)
     server_grant[index] = server_grant[index] + lease
     if lease > 0 then
+        server_grant.seq_id[index] = server_grant.seq_id[index] + 1
         gossip_queue:put({
             server = server_id,
+            seq_id = server_grant.seq_id[index],
             key = key,
             scaled_time = scaled_time,
             grant = server_grant[index]})
     end
     return {value = lease, expiration = time + 1 / SLICES}
+end
+
+local function release_lease(key, remainder)
+    -- get "scaled" time
+    local scaled_time = mfloor(remainder.expiration * SLICES - 1)
+    -- calculate resource usage for last 1 second
+    local cluster_grant = get_cluster_grant(key)
+    if not renew_grant(cluster_grant, scaled_time) then
+        return
+    end
+
+    local index = mmod(scaled_time, SLICES)
+    cluster_grant[index] = cluster_grant[index] - remainder.value
+
+    local server_grant = get_server_grant(server_id, key)
+    renew_grant(server_grant, scaled_time)
+    server_grant[index] = server_grant[index] - remainder.value
+
+    server_grant.seq_id[index] = server_grant.seq_id[index] + 1
+    gossip_queue:put({
+        server = server_id,
+        seq_id = server_grant.seq_id[index],
+        key = key,
+        scaled_time = scaled_time,
+        grant = server_grant[index]})
 end
 
 -- check if we have available remainder, or request lease if not
@@ -229,6 +259,9 @@ local function get_lease(user, domain, op, quota)
     local remainder = remainders[key]
     if not (remainder and remainder.expiration and remainder.expiration > time
         and remainder.value and remainder.value > 0) then
+        if remainder and remainder.value and remainder.value > 0 then
+            release_lease(key, remainder)
+        end
         remainder = request_lease(key, quota, time)
         remainders[key] = remainder
     end
