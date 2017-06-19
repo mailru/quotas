@@ -15,7 +15,7 @@ local math = require('math')
 -- cache lua functions
 local mmin = math.min
 local mmax = math.max
-local mmod = math.mod
+local mmod = math.fmod
 local mrandom = math.random
 local mfloor = math.floor
 
