@@ -96,8 +96,8 @@ get_lease(user, domain, op, quota)
 Parameters:
 
 * `user`, `domain`, `op` (strings) - may have any arbitrary values which
-  the organization agrees on. The names suggest the most common sort of values
-  - a user name such as 'guest', an area of applicability such as a space
+  the organization agrees on. The names suggest the most common sort of values:
+  a user name such as 'guest', an area of applicability such as a space
   name, and an operation such as 'insert'. However, the
   quota manager uses these values only to form a unique
   identifier of what has a requests-per-second `quota`.
