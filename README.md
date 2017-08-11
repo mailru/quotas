@@ -28,7 +28,7 @@ each other.
 
 Pre-requisites:
 
-* Tarantool version 1.6 or later
+* Tarantool version 1.6 or later,
 * `connpool` module (see https://github.com/tarantool/connpool).
 
 To bring in the `quotas` module (for this example we assume
